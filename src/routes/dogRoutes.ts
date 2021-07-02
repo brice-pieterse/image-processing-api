@@ -2,23 +2,59 @@ import express from 'express';
 import path from 'path';
 import sharp from 'sharp';
 import libraryType from '../types/library';
-
+import * as sharpUtils from '../utilities/sharp';
 import Library from '../models/library';
+import { sizeValidator, breedValidator } from '../utilities/validators';
 
 const dogRoutes = express.Router();
 const thumbsPath = path.resolve(__dirname, '../../assets/thumbs');
 const fullPicsPath = path.resolve(__dirname, '../../assets/full');
 
-dogRoutes.use(async (req, res) => {
-  const dog = req.query.breed as string;
-  const width = req.query.width ? req.query.width : undefined;
-  const height = req.query.height ? req.query.height : undefined;
-  const libraryQuery = `${width}x${height}`;
+let dog: string;
+let library: libraryType | undefined;
+let libraryQuery: string;
+let width: string | undefined;
+let height: string | undefined;
 
-  const library: libraryType | undefined =
-    (await Library.getLibrary()) as unknown as libraryType;
+// validate width and height are numbers
+dogRoutes.use((req, res, next) => {
+  width = req.query.width ? (req.query.width as string) : undefined;
+  height = req.query.height ? (req.query.height as string) : undefined;
+  let validation = true;
+  if (width && height) {
+    validation = sizeValidator(width as string, height as string);
+  } else if (width) {
+    validation = sizeValidator(width as string);
+  } else if (height) {
+    validation = sizeValidator(height as string);
+  }
+  if (validation) {
+    next();
+  } else
+    res.status(400).send({
+      message: 'width and height parameters must be numbers'
+    });
+});
 
-  // searches library cache for already made photos
+// validate breeds
+dogRoutes.use((req, res, next) => {
+  dog = req.query.breed as string;
+  if (dog && breedValidator(dog as string)) {
+    console.log('good dog');
+    next();
+  } else {
+    console.log('bad dog');
+    res.status(400).send({
+      message: 'include a breed param of corgi, maltese, or lab'
+    });
+  }
+});
+
+// searches library cache for already made photos
+dogRoutes.use(async (req, res, next) => {
+  libraryQuery = `${width}x${height}`;
+  library = (await Library.getLibrary()) as unknown as libraryType;
+
   if (
     library !== undefined &&
     library.dogPhotos[dog].includes(`${libraryQuery}.jpeg`)
@@ -26,68 +62,41 @@ dogRoutes.use(async (req, res) => {
     res
       .header('Content-Type', 'image/jpg')
       .sendFile(path.resolve(thumbsPath, dog, `${libraryQuery}.jpeg`));
+  } else {
+    next();
   }
+});
 
-  // else gets from full pics in fs and makes transforms
-  else if (
-    library !== undefined &&
-    (height !== undefined || width !== undefined)
-  ) {
+// else gets from full pics in fs and makes transforms
+dogRoutes.use(async (req, res, next) => {
+  if (library !== undefined && (height !== undefined || width !== undefined)) {
     const image = sharp(path.resolve(fullPicsPath, `${dog}.jpg`));
 
-    image.metadata().then((meta) => {
-      const h = height !== undefined ? parseInt(height as string) : meta.height;
+    const newImage = await sharpUtils.resize(
+      image,
+      width as string,
+      height as string
+    );
 
-      const w = width !== undefined ? parseInt(width as string) : meta.width;
+    sharpUtils
+      .saveToCache(newImage, dog, libraryQuery)
+      .then(async () => {
+        await Library.addToLibrary(library as libraryType, dog, libraryQuery);
+        return;
+      })
+      .then(() => {
+        res
+          .header('Content-Type', 'image/jpg')
+          .sendFile(path.resolve(thumbsPath, dog, `${libraryQuery}.jpeg`));
+      });
+  } else next();
+});
 
-      let sharpInstance: sharp.Sharp;
-
-      if (width && height) {
-        sharpInstance = image.resize({
-          width: w,
-          height: h,
-          fit: sharp.fit.cover
-        });
-      } else if (width) {
-        sharpInstance = image.resize({
-          width: w,
-          fit: sharp.fit.cover
-        });
-      } else {
-        sharpInstance = image.resize({
-          height: h,
-          fit: sharp.fit.cover
-        });
-      }
-
-      sharpInstance
-        .toFormat('jpeg')
-        // saves the newly created file to thumbs cache
-        .toFile(
-          path.resolve(
-            __dirname,
-            `../../assets/thumbs/${dog}/${libraryQuery}.jpeg`
-          )
-        )
-        // documents the newly created thumb in library
-        .then(async () => {
-          await Library.addToLibrary(library, dog, libraryQuery);
-          return;
-        })
-        .then(() => {
-          res
-            .header('Content-Type', 'image/jpg')
-            .sendFile(path.resolve(thumbsPath, dog, `${libraryQuery}.jpeg`));
-        });
-    });
-  }
-
-  // width and height not defined, just serve the fullsized image
-  else {
-    res
-      .header('Content-Type', 'image/jpg')
-      .sendFile(path.resolve(fullPicsPath, `${dog}.jpg`));
-  }
+// width and height not defined, just serve the fullsized image
+dogRoutes.use((req, res) => {
+  res
+    .header('Content-Type', 'image/jpg')
+    .sendFile(path.resolve(fullPicsPath, `${dog}.jpg`));
 });
 
 export default dogRoutes;
